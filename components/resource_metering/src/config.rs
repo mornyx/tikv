@@ -4,6 +4,7 @@ use crate::recorder::RecorderHandle;
 use crate::reporter::Task;
 
 use std::error::Error;
+use std::sync::atomic::AtomicBool;
 
 use online_config::{ConfigChange, OnlineConfig};
 use serde_derive::{Deserialize, Serialize};
@@ -14,6 +15,12 @@ const MIN_PRECISION: ReadableDuration = ReadableDuration::secs(1);
 const MAX_PRECISION: ReadableDuration = ReadableDuration::hours(1);
 const MAX_MAX_RESOURCE_GROUPS: usize = 5_000;
 const MIN_REPORT_RECEIVER_INTERVAL: ReadableDuration = ReadableDuration::secs(5);
+
+/// The reason for the existence of this switch is to avoid the continuous
+/// accumulation of summary data in the local logic of all threads.
+///
+/// Note all possible changes to `Config.enable`, we need to modify `GLOBAL_ENABLE` together.
+pub static GLOBAL_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Public configuration of resource metering module.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]

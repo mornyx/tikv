@@ -17,8 +17,10 @@ use crossbeam::channel::{unbounded, Receiver};
 use tikv_util::time::Instant;
 
 mod cpu;
+mod summary;
 
 pub use cpu::CpuRecorder;
+pub use summary::{record_read_keys, record_write_keys, SummaryRecorder};
 
 const RECORD_FREQUENCY: f64 = 99.0;
 const RECORD_LEN_THRESHOLD: usize = 20_000;
@@ -334,6 +336,7 @@ pub fn init_recorder(enable: bool, precision_ms: u64) -> RecorderHandle {
         .enable(enable)
         .precision_ms(Arc::new(AtomicU64::new(precision_ms)))
         .add_sub_recorder(Box::new(CpuRecorder::default()))
+        .add_sub_recorder(Box::new(SummaryRecorder::default()))
         .spawn()
         .expect("failed to create resource metering thread")
 }

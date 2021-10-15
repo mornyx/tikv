@@ -3,6 +3,8 @@
 use crate::ResourceMeteringTag;
 
 use std::cell::Cell;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,11 +19,20 @@ thread_local! {
 #[derive(Debug, Default)]
 pub struct RawRecord {
     pub cpu_time: u32, // ms
+    pub read_keys: u32,
+    pub write_keys: u32,
 }
 
 impl RawRecord {
     pub fn merge(&mut self, other: &Self) {
         self.cpu_time += other.cpu_time;
+        self.read_keys += other.read_keys;
+        self.write_keys += other.write_keys;
+    }
+
+    pub fn merge_summary(&mut self, r: &SummaryRecord) {
+        self.read_keys += r.r_count.load(Relaxed);
+        self.write_keys += r.w_count.load(Relaxed);
     }
 }
 
@@ -60,6 +71,8 @@ impl Default for RawRecords {
 pub struct Record {
     pub timestamps: Vec<u64>,
     pub cpu_time_list: Vec<u32>,
+    pub read_keys_list: Vec<u32>,
+    pub write_keys_list: Vec<u32>,
     pub total_cpu_time: u32,
 }
 
@@ -116,6 +129,8 @@ impl Records {
                     Record {
                         timestamps: vec![ts],
                         cpu_time_list: vec![raw_record.cpu_time],
+                        read_keys_list: vec![raw_record.read_keys],
+                        write_keys_list: vec![raw_record.write_keys],
                         total_cpu_time: raw_record.cpu_time,
                     },
                 );
@@ -125,9 +140,13 @@ impl Records {
             record.total_cpu_time += raw_record.cpu_time;
             if *record.timestamps.last().unwrap() == ts {
                 *record.cpu_time_list.last_mut().unwrap() += raw_record.cpu_time;
+                *record.read_keys_list.last_mut().unwrap() += raw_record.read_keys;
+                *record.write_keys_list.last_mut().unwrap() += raw_record.write_keys;
             } else {
                 record.timestamps.push(ts);
                 record.cpu_time_list.push(raw_record.cpu_time);
+                record.read_keys_list.push(raw_record.read_keys);
+                record.write_keys_list.push(raw_record.write_keys);
             }
         }
     }
@@ -197,6 +216,8 @@ impl Records {
                     .or_insert_with(RawRecord::default)
                     .merge(&RawRecord {
                         cpu_time: record.cpu_time_list[n],
+                        read_keys: record.read_keys_list[n],
+                        write_keys: record.write_keys_list[n],
                     });
             }
         }
@@ -221,10 +242,80 @@ impl Records {
     }
 }
 
+/// This structure represents a specific summary statistical item. It records various
+/// statistics (such as the number of keys scanned) within a particular scope.
+#[derive(Debug, Default)]
+pub struct SummaryRecord {
+    /// Number of keys that have been read.
+    pub r_count: AtomicU32,
+
+    /// Number of keys that have been written.
+    pub w_count: AtomicU32,
+}
+
+impl Clone for SummaryRecord {
+    fn clone(&self) -> Self {
+        Self {
+            r_count: AtomicU32::new(self.r_count.load(Relaxed)),
+            w_count: AtomicU32::new(self.w_count.load(Relaxed)),
+        }
+    }
+}
+
+impl SummaryRecord {
+    /// Reset all data to zero.
+    pub fn reset(&self) {
+        self.r_count.store(0, Relaxed);
+        self.w_count.store(0, Relaxed);
+    }
+
+    /// Add two items.
+    pub fn merge(&self, other: &Self) {
+        self.r_count.fetch_add(other.r_count.load(Relaxed), Relaxed);
+        self.w_count.fetch_add(other.w_count.load(Relaxed), Relaxed);
+    }
+
+    /// Gets the value and writes it to zero.
+    pub fn take_and_reset(&self) -> Self {
+        Self {
+            r_count: AtomicU32::new(self.r_count.swap(0, Relaxed)),
+            w_count: AtomicU32::new(self.w_count.swap(0, Relaxed)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TagInfos;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    #[test]
+    fn test_summary_record() {
+        let record = SummaryRecord {
+            r_count: AtomicU32::new(1),
+            w_count: AtomicU32::new(2),
+        };
+        assert_eq!(record.r_count.load(Relaxed), 1);
+        assert_eq!(record.w_count.load(Relaxed), 2);
+        let record2 = record.clone();
+        assert_eq!(record2.r_count.load(Relaxed), 1);
+        assert_eq!(record2.w_count.load(Relaxed), 2);
+        record.merge(&SummaryRecord {
+            r_count: AtomicU32::new(3),
+            w_count: AtomicU32::new(4),
+        });
+        assert_eq!(record.r_count.load(Relaxed), 4);
+        assert_eq!(record.w_count.load(Relaxed), 6);
+        let record2 = record.take_and_reset();
+        assert_eq!(record.r_count.load(Relaxed), 0);
+        assert_eq!(record.w_count.load(Relaxed), 0);
+        assert_eq!(record2.r_count.load(Relaxed), 4);
+        assert_eq!(record2.w_count.load(Relaxed), 6);
+        record2.reset();
+        assert_eq!(record2.r_count.load(Relaxed), 0);
+        assert_eq!(record2.w_count.load(Relaxed), 0);
+    }
 
     #[test]
     fn test_records() {
@@ -248,9 +339,30 @@ mod tests {
         }));
         let mut records = Records::default();
         let mut raw_map = HashMap::default();
-        raw_map.insert(tag1, RawRecord { cpu_time: 111 });
-        raw_map.insert(tag2, RawRecord { cpu_time: 444 });
-        raw_map.insert(tag3, RawRecord { cpu_time: 777 });
+        raw_map.insert(
+            tag1,
+            RawRecord {
+                cpu_time: 111,
+                read_keys: 222,
+                write_keys: 333,
+            },
+        );
+        raw_map.insert(
+            tag2,
+            RawRecord {
+                cpu_time: 444,
+                read_keys: 555,
+                write_keys: 666,
+            },
+        );
+        raw_map.insert(
+            tag3,
+            RawRecord {
+                cpu_time: 777,
+                read_keys: 888,
+                write_keys: 999,
+            },
+        );
         let raw = RawRecords {
             begin_unix_time_secs: 1,
             duration: Duration::from_secs(1),

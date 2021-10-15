@@ -72,6 +72,8 @@ impl Client for GrpcClient {
                 req.set_resource_group_tag(tag);
                 req.set_record_list_timestamp_sec(record.timestamps);
                 req.set_record_list_cpu_time_ms(record.cpu_time_list);
+                req.set_record_list_read_keys(record.read_keys_list);
+                req.set_record_list_write_keys(record.write_keys_list);
                 if let Err(err) = tx.send((req, WriteFlags::default())).await {
                     warn!("failed to send records"; "error" => ?err);
                     return;

@@ -5107,6 +5107,7 @@ dependencies = [
  "log_wrappers",
  "match_template",
  "protobuf",
+ "resource_metering",
  "slog",
  "slog-global",
  "smallvec",

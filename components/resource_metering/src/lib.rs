@@ -9,7 +9,7 @@ use crate::localstorage::STORAGE;
 
 use std::pin::Pin;
 use std::sync::atomic::AtomicPtr;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -25,9 +25,11 @@ pub mod utils;
 pub use client::{Client, GrpcClient};
 pub use collector::Collector;
 pub use collector::{register_collector, CollectorHandle, CollectorId};
-pub use config::{Config, ConfigManager};
+pub use config::{Config, ConfigManager, GLOBAL_ENABLE};
 pub use model::*;
-pub use recorder::{init_recorder, CpuRecorder, Recorder, RecorderBuilder, RecorderHandle};
+pub use recorder::{
+    init_recorder, record_read_keys, record_write_keys, RecorderBuilder, RecorderHandle,
+};
 pub use reporter::{Reporter, Task};
 
 pub const TEST_TAG_PREFIX: &[u8] = b"__resource_metering::tests::";
@@ -75,7 +77,8 @@ impl ResourceMeteringTag {
             let prev = s.shared_ptr.swap(self.clone());
             assert!(prev.is_none());
             s.is_set.set(true);
-            Guard { _tag: self.clone() }
+            s.summary_cur_record.reset();
+            Guard { tag: self.clone() }
         })
     }
 }
@@ -90,14 +93,39 @@ impl ResourceMeteringTag {
 /// [ResourceMeteringTag::attach]: crate::ResourceMeteringTag::attach
 #[derive(Default)]
 pub struct Guard {
-    _tag: ResourceMeteringTag,
+    tag: ResourceMeteringTag,
 }
+
+// Unlike shared_ptr in STORAGE, summary_records will continue to grow as the
+// query arrives. If the recorder thread is not working properly, these maps
+// will never be cleaned up, so here we need to make some restrictions.
+const MAX_SUMMARY_RECORDS_LEN: usize = 1000;
 
 impl Drop for Guard {
     fn drop(&mut self) {
         STORAGE.with(|s| {
             while s.shared_ptr.take().is_none() {}
             s.is_set.set(false);
+            // Judge GLOBAL_ENABLE to avoid unnecessary data accumulation when the switch is closed.
+            if GLOBAL_ENABLE.load(Relaxed) {
+                let mut records = s.summary_records.lock().unwrap();
+                if !self.tag.infos.extra_attachment.is_empty() {
+                    match records.get(&self.tag) {
+                        Some(record) => {
+                            record.merge(s.summary_cur_record.as_ref());
+                        }
+                        None => {
+                            // See MAX_SUMMARY_RECORDS_LEN.
+                            if records.len() < MAX_SUMMARY_RECORDS_LEN {
+                                records.insert(
+                                    self.tag.clone(),
+                                    s.summary_cur_record.as_ref().clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         })
     }
 }
@@ -245,13 +273,13 @@ mod tests {
             };
             {
                 let guard = tag.attach();
-                assert_eq!(guard._tag.infos, tag.infos);
+                assert_eq!(guard.tag.infos, tag.infos);
                 STORAGE.with(|s| {
                     let local_tag = s.shared_ptr.take();
                     assert!(local_tag.is_some());
                     let local_tag = local_tag.unwrap();
                     assert_eq!(local_tag.infos, tag.infos);
-                    assert_eq!(local_tag.infos, guard._tag.infos);
+                    assert_eq!(local_tag.infos, guard.tag.infos);
                     assert!(s.shared_ptr.swap(local_tag).is_none());
                 });
                 // drop here.

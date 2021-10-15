@@ -1,10 +1,12 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::{utils, SharedTagPtr};
+use crate::model::SummaryRecord;
+use crate::{utils, ResourceMeteringTag, SharedTagPtr};
 
 use std::cell::Cell;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use collections::HashMap;
 use crossbeam::channel::Sender;
 use lazy_static::lazy_static;
 
@@ -24,6 +26,8 @@ thread_local! {
         let storage = LocalStorage {
             is_set: Cell::new(false),
             shared_ptr: SharedTagPtr::default(),
+            summary_cur_record: Arc::new(SummaryRecord::default()),
+            summary_records: Arc::new(Mutex::new(HashMap::default())),
         };
         let lsr = LocalStorageRef{id: utils::thread_id(), storage: storage.clone()};
         STORAGE_CHANS.lock().unwrap().iter().for_each(|sender| {
@@ -41,6 +45,8 @@ thread_local! {
 pub struct LocalStorage {
     pub is_set: Cell<bool>,
     pub shared_ptr: SharedTagPtr,
+    pub summary_cur_record: Arc<SummaryRecord>,
+    pub summary_records: Arc<Mutex<HashMap<ResourceMeteringTag, SummaryRecord>>>,
 }
 
 /// This structure is transmitted as a event in [STORAGE_CHAN].
