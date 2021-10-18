@@ -71,19 +71,14 @@ impl SubRecorder for SummaryRecorder {
 mod tests {
     use super::*;
     use crate::localstorage::register_storage_chan_tx;
-    use crate::GLOBAL_ENABLE;
-    use crate::{ResourceMeteringTag, TagInfos};
+    use crate::{ResourceMeteringTag, TagInfos, GLOBAL_ENABLE};
     use crossbeam::channel::unbounded;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
-    use tikv_util::defer;
 
     #[test]
     fn test_collect() {
         GLOBAL_ENABLE.store(true, SeqCst);
-        defer! {{
-            GLOBAL_ENABLE.store(false, SeqCst);
-        }};
         let (tx, rx) = unbounded();
         register_storage_chan_tx(tx);
 

@@ -459,30 +459,4 @@ fn test_summary_recorder() {
 
         collector.check(expected);
     }
-
-    // Turn off the switch explicitly.
-    {
-        GLOBAL_ENABLE.store(false, SeqCst);
-        let collector = DummyCollector::default();
-        let _handle = register_collector(Box::new(collector.clone()));
-
-        let (handle, _) = Operations::begin()
-            .then(SetContext("ctx-0"))
-            .then(ReadKeys(101))
-            .then(WriteKeys(102))
-            .then(ResetContext)
-            .then(SetContext("ctx-1"))
-            .then(ReadKeys(103))
-            .then(WriteKeys(104))
-            .then(ResetContext)
-            .then(SetContext("ctx-2"))
-            .then(ReadKeys(105))
-            .then(WriteKeys(106))
-            .then(ResetContext)
-            .spawn();
-        handle.join().unwrap();
-
-        // No matter how many times we execute `record_xxx`, the result should be empty.
-        collector.check(HashMap::default());
-    }
 }
