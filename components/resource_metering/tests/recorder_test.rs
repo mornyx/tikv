@@ -395,6 +395,7 @@ fn test_summary_recorder() {
             .spawn();
         handle.join().unwrap();
 
+        dbg!(&expected);
         collector.check(expected);
     }
 

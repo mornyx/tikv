@@ -107,22 +107,25 @@ impl Drop for Guard {
             while s.shared_ptr.take().is_none() {}
             s.is_set.set(false);
             // Judge GLOBAL_ENABLE to avoid unnecessary data accumulation when the switch is closed.
-            if GLOBAL_ENABLE.load(Relaxed) {
-                let mut records = s.summary_records.lock().unwrap();
-                if !self.tag.infos.extra_attachment.is_empty() {
-                    match records.get(&self.tag) {
-                        Some(record) => {
-                            record.merge(s.summary_cur_record.as_ref());
-                        }
-                        None => {
-                            // See MAX_SUMMARY_RECORDS_LEN.
-                            if records.len() < MAX_SUMMARY_RECORDS_LEN {
-                                records.insert(
-                                    self.tag.clone(),
-                                    s.summary_cur_record.as_ref().clone(),
-                                );
-                            }
-                        }
+            if !GLOBAL_ENABLE.load(Relaxed) {
+                return;
+            }
+            if self.tag.infos.extra_attachment.is_empty() {
+                return;
+            }
+            let cur = s.summary_cur_record.as_ref();
+            if cur.r_count.load(Relaxed) == 0 && cur.w_count.load(Relaxed) == 0 {
+                return;
+            }
+            let mut records = s.summary_records.lock().unwrap();
+            match records.get(&self.tag) {
+                Some(record) => {
+                    record.merge(cur);
+                }
+                None => {
+                    // See MAX_SUMMARY_RECORDS_LEN.
+                    if records.len() < MAX_SUMMARY_RECORDS_LEN {
+                        records.insert(self.tag.clone(), cur.clone());
                     }
                 }
             }
