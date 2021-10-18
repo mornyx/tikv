@@ -189,6 +189,7 @@ impl Collector for DummyCollector {
 }
 
 impl DummyCollector {
+    #[cfg(target_os = "linux")]
     fn check(&self, mut expected: HashMap<Vec<u8>, RawRecord>) {
         const MAX_DRIFT: u32 = 50;
 
@@ -214,6 +215,20 @@ impl DummyCollector {
                     value.cpu_time
                 );
             }
+        }
+    }
+
+    fn check_summary(&self, mut expected: HashMap<Vec<u8>, RawRecord>) {
+        std::thread::sleep(Duration::from_millis(1200));
+        let mut records = self.records.lock().unwrap();
+        for k in expected.keys() {
+            records.entry(k.clone()).or_insert_with(RawRecord::default);
+        }
+        for k in records.keys() {
+            expected.entry(k.clone()).or_insert_with(RawRecord::default);
+        }
+        for (k, expected_value) in expected {
+            let value = records.get(&k).unwrap();
             if value.read_keys != expected_value.read_keys {
                 panic!(
                     "tag {} read keys expected {:?} but got {:?}",
@@ -395,8 +410,7 @@ fn test_summary_recorder() {
             .spawn();
         handle.join().unwrap();
 
-        dbg!(&expected);
-        collector.check(expected);
+        collector.check_summary(expected);
     }
 
     {
@@ -411,7 +425,7 @@ fn test_summary_recorder() {
             .spawn();
         handle.join().unwrap();
 
-        collector.check(expected);
+        collector.check_summary(expected);
     }
 
     {
@@ -434,7 +448,7 @@ fn test_summary_recorder() {
             .spawn();
         handle.join().unwrap();
 
-        collector.check(expected);
+        collector.check_summary(expected);
     }
 
     // Execute `record_xxx` out of context.
@@ -458,6 +472,6 @@ fn test_summary_recorder() {
             .spawn();
         handle.join().unwrap();
 
-        collector.check(expected);
+        collector.check_summary(expected);
     }
 }
