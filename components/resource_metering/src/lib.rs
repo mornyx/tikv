@@ -28,7 +28,8 @@ pub use collector::{register_collector, CollectorHandle, CollectorId};
 pub use config::{Config, ConfigManager, GLOBAL_ENABLE};
 pub use model::*;
 pub use recorder::{
-    init_recorder, record_read_keys, record_write_keys, RecorderBuilder, RecorderHandle,
+    init_recorder, record_read_keys, record_write_keys, CpuRecorder, RecorderBuilder,
+    RecorderHandle, SummaryRecorder,
 };
 pub use reporter::{Reporter, Task};
 

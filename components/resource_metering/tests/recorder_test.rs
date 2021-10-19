@@ -1,17 +1,19 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use collections::HashMap;
-#[cfg(target_os = "linux")]
-use resource_metering::utils;
 use resource_metering::{
-    init_recorder, record_read_keys, record_write_keys, register_collector, Collector, RawRecord,
-    RawRecords, ResourceMeteringTag, TagInfos, GLOBAL_ENABLE, TEST_TAG_PREFIX,
+    record_read_keys, record_write_keys, register_collector, Collector, RawRecord, RawRecords,
+    RecorderBuilder, ResourceMeteringTag, SummaryRecorder, TagInfos, GLOBAL_ENABLE,
+    TEST_TAG_PREFIX,
 };
+#[cfg(target_os = "linux")]
+use resource_metering::{utils, CpuRecorder};
 
 use Operation::*;
 
@@ -252,7 +254,12 @@ impl DummyCollector {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cpu_recorder() {
-    let handle = init_recorder(true, 1000);
+    let handle = RecorderBuilder::default()
+        .enable(true)
+        .precision_ms(Arc::new(AtomicU64::new(1000)))
+        .add_sub_recorder(Box::new(CpuRecorder::default()))
+        .spawn()
+        .expect("failed to create resource metering thread");
     handle.resume();
     fail::cfg("cpu-record-test-filter", "return").unwrap();
 
@@ -396,7 +403,12 @@ fn test_summary_recorder() {
     // Turn on the switch explicitly.
     GLOBAL_ENABLE.store(true, SeqCst);
 
-    let handle = init_recorder(true, 1000);
+    let handle = RecorderBuilder::default()
+        .enable(true)
+        .precision_ms(Arc::new(AtomicU64::new(1000)))
+        .add_sub_recorder(Box::new(SummaryRecorder::default()))
+        .spawn()
+        .expect("failed to create resource metering thread");
     handle.resume();
 
     {
