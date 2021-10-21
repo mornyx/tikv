@@ -78,6 +78,8 @@ impl Client for GrpcClient {
                 let mut req = ResourceUsageRecord::default();
                 req.set_record_list_timestamp_sec(others.keys().copied().collect());
                 req.set_record_list_cpu_time_ms(others.values().map(|r| r.cpu_time).collect());
+                req.set_record_list_read_keys(others.values().map(|r| r.read_keys).collect());
+                req.set_record_list_write_keys(others.values().map(|r| r.write_keys).collect());
                 if let Err(err) = tx.send((req, WriteFlags::default())).await {
                     warn!("failed to send records"; "error" => ?err);
                     return;
