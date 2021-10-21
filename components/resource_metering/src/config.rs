@@ -5,6 +5,7 @@ use crate::reporter::Task;
 
 use std::error::Error;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
 use online_config::{ConfigChange, OnlineConfig};
 use serde_derive::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ const MIN_REPORT_RECEIVER_INTERVAL: ReadableDuration = ReadableDuration::secs(5)
 /// accumulation of summary data in the local logic of all threads.
 ///
 /// Note all possible changes to `Config.enable`, we need to modify `GLOBAL_ENABLE` together.
-pub static GLOBAL_ENABLE: AtomicBool = AtomicBool::new(false);
+pub static GLOBAL_ENABLE: AtomicBool = AtomicBool::new(true);
 
 /// Public configuration of resource metering module.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
@@ -120,6 +121,7 @@ impl online_config::ConfigManager for ConfigManager {
         let mut new_config = self.current_config.clone();
         new_config.update(change);
         new_config.validate()?;
+        GLOBAL_ENABLE.store(new_config.enabled, Relaxed);
         // Pause or resume the recorder thread.
         if self.current_config.enabled != new_config.enabled {
             if new_config.enabled {
