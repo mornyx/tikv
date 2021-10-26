@@ -98,7 +98,7 @@ pub struct Guard {
 }
 
 // Unlike shared_ptr in STORAGE, summary_records will continue to grow as the
-// query arrives. If the recorder thread is not working properly, these maps
+// request arrives. If the recorder thread is not working properly, these maps
 // will never be cleaned up, so here we need to make some restrictions.
 const MAX_SUMMARY_RECORDS_LEN: usize = 1000;
 
