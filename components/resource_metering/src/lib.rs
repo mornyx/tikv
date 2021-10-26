@@ -107,7 +107,7 @@ impl Drop for Guard {
         STORAGE.with(|s| {
             while s.shared_ptr.take().is_none() {}
             s.is_set.set(false);
-            // Judge GLOBAL_ENABLE to avoid unnecessary data accumulation when the switch is closed.
+            // Check GLOBAL_ENABLE to avoid unnecessary data accumulation when resource metering is not enabled.
             if !GLOBAL_ENABLE.load(Relaxed) {
                 return;
             }
