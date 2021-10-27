@@ -45,7 +45,7 @@ thread_local! {
 ///
 /// In order to facilitate mutual reference, the thread-local data of all sub-modules
 /// need to be stored centrally in `ThreadLocalData`.
-struct ThreadLocalData {
+pub struct ThreadLocalData {
     pub is_set: Cell<bool>,
     pub shared_ptr: SharedTagPtr,
     pub summary_cur_record: Arc<SummaryRecord>,
@@ -97,7 +97,6 @@ mod tests {
         .unwrap();
         let mut count = 0;
         while let Ok(msg) = rx.try_recv() {
-            assert!(matches!(msg, ThreadLocalMsg::Created(_)));
             match msg {
                 ThreadLocalMsg::Created(r) => {
                     assert_ne!(r.id, 0);

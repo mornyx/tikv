@@ -1,9 +1,5 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![allow(dead_code)]
-
-use collections::HashSet;
-
 /// Gets the ID of the current process.
 #[cfg(target_os = "linux")]
 pub fn process_id() -> usize {
@@ -29,27 +25,6 @@ pub fn thread_id() -> usize {
 #[cfg(not(target_os = "linux"))]
 pub fn thread_id() -> usize {
     thread_id::get()
-}
-
-/// Get all thread id collections under the current process.
-#[cfg(target_os = "linux")]
-pub fn thread_ids() -> Option<HashSet<usize>> {
-    std::fs::read_dir(format!("/proc/{}/task", process_id()))
-        .ok()
-        .map(|dir| {
-            dir.filter_map(|task| {
-                let file_name = task.ok().map(|t| t.file_name());
-                file_name.and_then(|f| f.to_str().and_then(|tid| tid.parse().ok()))
-            })
-            .map(|id: libc::pid_t| id as usize)
-            .collect::<HashSet<usize>>()
-        })
-}
-
-/// Get all thread id collections under the current process.
-#[cfg(not(target_os = "linux"))]
-pub fn thread_ids() -> Option<HashSet<usize>> {
-    None
 }
 
 /// Get system clock tick.
@@ -112,13 +87,5 @@ mod tests {
         })
         .join()
         .unwrap();
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn test_thread_ids() {
-        let ids = thread_ids();
-        assert!(ids.is_some());
-        assert!(!ids.unwrap().is_empty());
     }
 }

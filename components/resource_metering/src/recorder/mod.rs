@@ -2,7 +2,7 @@
 
 use crate::collector::{Collector, CollectorReg, COLLECTOR_REG_CHAN};
 use crate::threadlocal::{register_thread_local_chan_tx, ThreadLocalMsg, ThreadLocalRef};
-use crate::{utils, RawRecords, SharedTagPtr};
+use crate::{RawRecords, SharedTagPtr};
 
 use std::io;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -138,14 +138,6 @@ impl Recorder {
 
     fn cleanup(&mut self) {
         if self.last_cleanup.saturating_elapsed().as_secs() > CLEANUP_INTERVAL_SECS {
-            // Clean up the data of the destroyed threads.
-            if let Some(ids) = utils::thread_ids() {
-                self.thread_stores.retain(|k, v| {
-                    let retain = ids.contains(k);
-                    assert!(retain || v.shared_ptr.take().is_none());
-                    retain
-                });
-            }
             if self.records.records.capacity() > RECORD_LEN_THRESHOLD
                 && self.records.records.len() < (RECORD_LEN_THRESHOLD / 2)
             {
@@ -354,7 +346,7 @@ pub fn init_recorder(enable: bool, precision_ms: u64) -> RecorderHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threadlocal::STORAGE;
+    use crate::threadlocal::LOCAL_DATA;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -405,7 +397,7 @@ mod tests {
         let (tx, rx) = unbounded();
         register_thread_local_chan_tx(tx);
         std::thread::spawn(|| {
-            STORAGE.with(|_| {});
+            LOCAL_DATA.with(|_| {});
         })
         .join()
         .unwrap();

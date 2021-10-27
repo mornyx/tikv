@@ -30,8 +30,8 @@ impl RawRecord {
     }
 
     pub fn merge_summary(&mut self, r: &SummaryRecord) {
-        self.read_keys += r.read_keys.get();
-        self.write_keys += r.write_keys.get();
+        self.read_keys += r.read_keys.load(Relaxed);
+        self.write_keys += r.write_keys.load(Relaxed);
     }
 }
 
