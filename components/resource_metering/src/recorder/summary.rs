@@ -11,14 +11,14 @@ use collections::HashMap;
 /// Records how many keys have been read in the current context.
 pub fn record_read_keys(count: u32) {
     LOCAL_DATA.with(|tld| {
-        tld.summary_cur_record.r_count.fetch_add(count, Relaxed);
+        tld.summary_cur_record.read_keys.fetch_add(count, Relaxed);
     })
 }
 
 /// Records how many keys have been written in the current context.
 pub fn record_write_keys(count: u32) {
     LOCAL_DATA.with(|tld| {
-        tld.summary_cur_record.w_count.fetch_add(count, Relaxed);
+        tld.summary_cur_record.write_keys.fetch_add(count, Relaxed);
     })
 }
 
@@ -96,8 +96,8 @@ mod tests {
                 record_read_keys(1);
                 record_write_keys(2);
                 LOCAL_DATA.with(|tld| {
-                    assert_eq!(tld.summary_cur_record.r_count.load(Relaxed), 1);
-                    assert_eq!(tld.summary_cur_record.w_count.load(Relaxed), 2);
+                    assert_eq!(tld.summary_cur_record.read_keys.load(Relaxed), 1);
+                    assert_eq!(tld.summary_cur_record.write_keys.load(Relaxed), 2);
                     assert_eq!(tld.summary_records.lock().unwrap().len(), 0);
                 });
                 // summary_cur_record here will be merged into the summary_records.
@@ -109,8 +109,8 @@ mod tests {
             record_read_keys(3);
             record_write_keys(4);
             LOCAL_DATA.with(|tld| {
-                assert_eq!(tld.summary_cur_record.r_count.load(Relaxed), 3);
-                assert_eq!(tld.summary_cur_record.w_count.load(Relaxed), 4);
+                assert_eq!(tld.summary_cur_record.read_keys.load(Relaxed), 3);
+                assert_eq!(tld.summary_cur_record.write_keys.load(Relaxed), 4);
                 assert_eq!(tld.summary_records.lock().unwrap().len(), 1);
             });
 
@@ -127,8 +127,8 @@ mod tests {
                 record_read_keys(5);
                 record_write_keys(6);
                 LOCAL_DATA.with(|tld| {
-                    assert_eq!(tld.summary_cur_record.r_count.load(Relaxed), 5);
-                    assert_eq!(tld.summary_cur_record.w_count.load(Relaxed), 6);
+                    assert_eq!(tld.summary_cur_record.read_keys.load(Relaxed), 5);
+                    assert_eq!(tld.summary_cur_record.write_keys.load(Relaxed), 6);
                     assert_eq!(tld.summary_records.lock().unwrap().len(), 0);
                 });
             })

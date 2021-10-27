@@ -78,7 +78,6 @@ impl ResourceMeteringTag {
             let prev = tld.shared_ptr.swap(self.clone());
             assert!(prev.is_none());
             tld.is_set.set(true);
-            tld.summary_cur_record.reset();
             Guard { tag: self.clone() }
         })
     }
@@ -114,19 +113,19 @@ impl Drop for Guard {
             if self.tag.infos.extra_attachment.is_empty() {
                 return;
             }
-            let cur = tld.summary_cur_record.as_ref();
-            if cur.r_count.load(Relaxed) == 0 && cur.w_count.load(Relaxed) == 0 {
+            let cur = tld.summary_cur_record.take_and_reset();
+            if cur.read_keys.load(Relaxed) == 0 && cur.write_keys.load(Relaxed) == 0 {
                 return;
             }
             let mut records = tld.summary_records.lock().unwrap();
             match records.get(&self.tag) {
                 Some(record) => {
-                    record.merge(cur);
+                    record.merge(&cur);
                 }
                 None => {
                     // See MAX_SUMMARY_RECORDS_LEN.
                     if records.len() < MAX_SUMMARY_RECORDS_LEN {
-                        records.insert(self.tag.clone(), cur.clone());
+                        records.insert(self.tag.clone(), cur);
                     }
                 }
             }

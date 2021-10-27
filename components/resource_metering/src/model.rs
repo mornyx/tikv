@@ -15,7 +15,6 @@ thread_local! {
     static STATIC_BUF: Cell<Vec<u32>> = Cell::new(vec![]);
 }
 
-/// Raw resource statistics record.
 #[derive(Debug, Default)]
 pub struct RawRecord {
     pub cpu_time: u32, // ms
@@ -31,19 +30,11 @@ impl RawRecord {
     }
 
     pub fn merge_summary(&mut self, r: &SummaryRecord) {
-        self.read_keys += r.r_count.load(Relaxed);
-        self.write_keys += r.w_count.load(Relaxed);
+        self.read_keys += r.read_keys.get();
+        self.write_keys += r.write_keys.get();
     }
 }
 
-/// Raw resource statistics record list with time window.
-///
-/// This structure is used for initial aggregation in the [Recorder] and also
-/// used for reporting to [Reporter] through the [Collector].
-///
-/// [Recorder]: crate::recorder::Recorder
-/// [Reporter]: crate::reporter::Reporter
-/// [Collector]: crate::collector::Collector
 #[derive(Debug)]
 pub struct RawRecords {
     pub begin_unix_time_secs: u64,
@@ -66,7 +57,6 @@ impl Default for RawRecords {
     }
 }
 
-/// Resource statistics.
 #[derive(Debug, Default)]
 pub struct Record {
     pub timestamps: Vec<u64>,
@@ -76,13 +66,6 @@ pub struct Record {
     pub total_cpu_time: u32,
 }
 
-/// Resource statistics map.
-///
-/// This structure is used for final aggregation in the [Reporter] and also
-/// for uploading to the remote side through [Client].
-///
-/// [Reporter]: crate::reporter::CpuReporter
-/// [Client]: crate::client::Client
 #[derive(Debug, Default)]
 pub struct Records {
     pub records: HashMap<Vec<u8>, Record>,
@@ -90,7 +73,7 @@ pub struct Records {
 }
 
 impl Records {
-    /// Aggregates [RawCpuRecords] into [CpuRecords].
+    /// Aggregates [RawRecords] into [Records].
     pub fn append(&mut self, raw_records: Arc<RawRecords>) {
         // # Before
         //
@@ -225,13 +208,11 @@ impl Records {
         STATIC_BUF.with(move |b| b.set(buf));
     }
 
-    /// Clear all internal data.
     pub fn clear(&mut self) {
         self.records.clear();
         self.others.clear();
     }
 
-    /// Whether `Records` is empty.
     pub fn is_empty(&self) -> bool {
         if self.records.is_empty() {
             assert!(self.others.is_empty());
@@ -242,22 +223,20 @@ impl Records {
     }
 }
 
-/// This structure represents a specific summary statistical item. It records various
-/// statistics (such as the number of keys scanned) within a particular scope.
 #[derive(Debug, Default)]
 pub struct SummaryRecord {
     /// Number of keys that have been read.
-    pub r_count: AtomicU32,
+    pub read_keys: AtomicU32,
 
     /// Number of keys that have been written.
-    pub w_count: AtomicU32,
+    pub write_keys: AtomicU32,
 }
 
 impl Clone for SummaryRecord {
     fn clone(&self) -> Self {
         Self {
-            r_count: AtomicU32::new(self.r_count.load(Relaxed)),
-            w_count: AtomicU32::new(self.w_count.load(Relaxed)),
+            read_keys: AtomicU32::new(self.read_keys.load(Relaxed)),
+            write_keys: AtomicU32::new(self.write_keys.load(Relaxed)),
         }
     }
 }
@@ -265,21 +244,23 @@ impl Clone for SummaryRecord {
 impl SummaryRecord {
     /// Reset all data to zero.
     pub fn reset(&self) {
-        self.r_count.store(0, Relaxed);
-        self.w_count.store(0, Relaxed);
+        self.read_keys.store(0, Relaxed);
+        self.write_keys.store(0, Relaxed);
     }
 
     /// Add two items.
     pub fn merge(&self, other: &Self) {
-        self.r_count.fetch_add(other.r_count.load(Relaxed), Relaxed);
-        self.w_count.fetch_add(other.w_count.load(Relaxed), Relaxed);
+        self.read_keys
+            .fetch_add(other.read_keys.load(Relaxed), Relaxed);
+        self.write_keys
+            .fetch_add(other.write_keys.load(Relaxed), Relaxed);
     }
 
     /// Gets the value and writes it to zero.
     pub fn take_and_reset(&self) -> Self {
         Self {
-            r_count: AtomicU32::new(self.r_count.swap(0, Relaxed)),
-            w_count: AtomicU32::new(self.w_count.swap(0, Relaxed)),
+            read_keys: AtomicU32::new(self.read_keys.swap(0, Relaxed)),
+            write_keys: AtomicU32::new(self.write_keys.swap(0, Relaxed)),
         }
     }
 }
@@ -293,28 +274,28 @@ mod tests {
     #[test]
     fn test_summary_record() {
         let record = SummaryRecord {
-            r_count: AtomicU32::new(1),
-            w_count: AtomicU32::new(2),
+            read_keys: AtomicU32::new(1),
+            write_keys: AtomicU32::new(2),
         };
-        assert_eq!(record.r_count.load(Relaxed), 1);
-        assert_eq!(record.w_count.load(Relaxed), 2);
+        assert_eq!(record.read_keys.load(Relaxed), 1);
+        assert_eq!(record.write_keys.load(Relaxed), 2);
         let record2 = record.clone();
-        assert_eq!(record2.r_count.load(Relaxed), 1);
-        assert_eq!(record2.w_count.load(Relaxed), 2);
+        assert_eq!(record2.read_keys.load(Relaxed), 1);
+        assert_eq!(record2.write_keys.load(Relaxed), 2);
         record.merge(&SummaryRecord {
-            r_count: AtomicU32::new(3),
-            w_count: AtomicU32::new(4),
+            read_keys: AtomicU32::new(3),
+            write_keys: AtomicU32::new(4),
         });
-        assert_eq!(record.r_count.load(Relaxed), 4);
-        assert_eq!(record.w_count.load(Relaxed), 6);
+        assert_eq!(record.read_keys.load(Relaxed), 4);
+        assert_eq!(record.write_keys.load(Relaxed), 6);
         let record2 = record.take_and_reset();
-        assert_eq!(record.r_count.load(Relaxed), 0);
-        assert_eq!(record.w_count.load(Relaxed), 0);
-        assert_eq!(record2.r_count.load(Relaxed), 4);
-        assert_eq!(record2.w_count.load(Relaxed), 6);
+        assert_eq!(record.read_keys.load(Relaxed), 0);
+        assert_eq!(record.write_keys.load(Relaxed), 0);
+        assert_eq!(record2.read_keys.load(Relaxed), 4);
+        assert_eq!(record2.write_keys.load(Relaxed), 6);
         record2.reset();
-        assert_eq!(record2.r_count.load(Relaxed), 0);
-        assert_eq!(record2.w_count.load(Relaxed), 0);
+        assert_eq!(record2.read_keys.load(Relaxed), 0);
+        assert_eq!(record2.write_keys.load(Relaxed), 0);
     }
 
     #[test]
