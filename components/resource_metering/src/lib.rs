@@ -5,7 +5,7 @@
 #![feature(shrink_to)]
 #![feature(hash_drain_filter)]
 
-use crate::localstorage::STORAGE;
+use crate::threadlocal::LOCAL_DATA;
 
 use std::pin::Pin;
 use std::sync::atomic::AtomicPtr;
@@ -16,10 +16,10 @@ use std::task::{Context, Poll};
 mod client;
 mod collector;
 mod config;
-mod localstorage;
 mod model;
 mod recorder;
 mod reporter;
+mod threadlocal;
 pub mod utils;
 
 pub use client::{Client, GrpcClient};
@@ -65,20 +65,20 @@ impl ResourceMeteringTag {
     /// to attach to the thread local context.
     ///
     /// When you call this method, the `ResourceMeteringTag` itself will be
-    /// attached to [STORAGE], and a [Guard] used to control the life of the
+    /// attached to [LOCAL_DATA], and a [Guard] used to control the life of the
     /// tag is returned. When the `Guard` is discarded, the tag (and other
-    /// fields if necessary) in `STORAGE` will be cleaned up.
+    /// fields if necessary) in `LOCAL_DATA` will be cleaned up.
     ///
-    /// [STORAGE]: crate::localstorage::STORAGE
+    /// [LOCAL_DATA]: crate::threadlocal::LOCAL_DATA
     pub fn attach(&self) -> Guard {
-        STORAGE.with(|s| {
-            if s.is_set.get() {
+        LOCAL_DATA.with(|tld| {
+            if tld.is_set.get() {
                 panic!("nested attachment is not allowed")
             }
-            let prev = s.shared_ptr.swap(self.clone());
+            let prev = tld.shared_ptr.swap(self.clone());
             assert!(prev.is_none());
-            s.is_set.set(true);
-            s.summary_cur_record.reset();
+            tld.is_set.set(true);
+            tld.summary_cur_record.reset();
             Guard { tag: self.clone() }
         })
     }
@@ -97,16 +97,16 @@ pub struct Guard {
     tag: ResourceMeteringTag,
 }
 
-// Unlike shared_ptr in STORAGE, summary_records will continue to grow as the
+// Unlike shared_ptr in LOCAL_DATA, summary_records will continue to grow as the
 // request arrives. If the recorder thread is not working properly, these maps
 // will never be cleaned up, so here we need to make some restrictions.
 const MAX_SUMMARY_RECORDS_LEN: usize = 1000;
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        STORAGE.with(|s| {
-            while s.shared_ptr.take().is_none() {}
-            s.is_set.set(false);
+        LOCAL_DATA.with(|tld| {
+            while tld.shared_ptr.take().is_none() {}
+            tld.is_set.set(false);
             // Check GLOBAL_ENABLE to avoid unnecessary data accumulation when resource metering is not enabled.
             if !GLOBAL_ENABLE.load(Relaxed) {
                 return;
@@ -114,11 +114,11 @@ impl Drop for Guard {
             if self.tag.infos.extra_attachment.is_empty() {
                 return;
             }
-            let cur = s.summary_cur_record.as_ref();
+            let cur = tld.summary_cur_record.as_ref();
             if cur.r_count.load(Relaxed) == 0 && cur.w_count.load(Relaxed) == 0 {
                 return;
             }
-            let mut records = s.summary_records.lock().unwrap();
+            let mut records = tld.summary_records.lock().unwrap();
             match records.get(&self.tag) {
                 Some(record) => {
                     record.merge(cur);
@@ -278,18 +278,18 @@ mod tests {
             {
                 let guard = tag.attach();
                 assert_eq!(guard.tag.infos, tag.infos);
-                STORAGE.with(|s| {
-                    let local_tag = s.shared_ptr.take();
+                LOCAL_DATA.with(|tld| {
+                    let local_tag = tld.shared_ptr.take();
                     assert!(local_tag.is_some());
                     let local_tag = local_tag.unwrap();
                     assert_eq!(local_tag.infos, tag.infos);
                     assert_eq!(local_tag.infos, guard.tag.infos);
-                    assert!(s.shared_ptr.swap(local_tag).is_none());
+                    assert!(tld.shared_ptr.swap(local_tag).is_none());
                 });
                 // drop here.
             }
-            STORAGE.with(|s| {
-                let local_tag = s.shared_ptr.take();
+            LOCAL_DATA.with(|tld| {
+                let local_tag = tld.shared_ptr.take();
                 assert!(local_tag.is_none());
             });
         })

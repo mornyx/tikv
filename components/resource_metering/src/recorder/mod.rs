@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::collector::{Collector, CollectorReg, COLLECTOR_REG_CHAN};
-use crate::localstorage::{register_storage_chan_tx, LocalStorage, LocalStorageRef};
+use crate::threadlocal::{register_thread_local_chan_tx, ThreadLocalMsg, ThreadLocalRef};
 use crate::{utils, RawRecords, SharedTagPtr};
 
 use std::io;
@@ -34,32 +34,33 @@ const CLEANUP_INTERVAL_SECS: u64 = 15 * 60;
 pub trait SubRecorder {
     /// This function is called at a fixed frequency. (A typical frequency is 99hz.)
     ///
-    /// The [RawRecords] and [LocalStorage] map of all threads will be passed in through
-    /// parameters. We need to collect resources (may be from each `LocalStorage`) and
+    /// The [RawRecords] and [ThreadLocalData] map of all threads will be passed in through
+    /// parameters. We need to collect resources (may be from each `ThreadLocalData`) and
     /// write them into `RawRecords`.
     ///
     /// The implementation needs to sample the resource in this function (in general).
     ///
     /// [RawRecords]: crate::model::RawRecords
-    /// [LocalStorage]: crate::localstorage::LocalStorage
+    /// [ThreadLocalData]: crate::threadlocal::ThreadLocalData
     fn tick(
         &mut self,
         _records: &mut RawRecords,
-        _thread_stores: &mut HashMap<usize, LocalStorage>,
+        _thread_stores: &mut HashMap<usize, ThreadLocalRef>,
     ) {
     }
 
     /// This function is called every time before reporting to Collector.
     /// The default period is 1 second.
     ///
-    /// The [RawRecords] and [LocalStorage] map of all threads will be passed in through parameters.
+    /// The [RawRecords] and [ThreadLocalData] map of all threads will be passed in through parameters.
+    /// `usize` is thread_id without platform dependency.
     ///
     /// [RawRecords]: crate::model::RawRecords
-    /// [LocalStorage]: crate::localstorage::LocalStorage
+    /// [ThreadLocalData]: crate::threadlocal::ThreadLocalData
     fn collect(
         &mut self,
         _records: &mut RawRecords,
-        _thread_stores: &mut HashMap<usize, LocalStorage>,
+        _thread_stores: &mut HashMap<usize, ThreadLocalRef>,
     ) {
     }
 
@@ -94,8 +95,8 @@ pub struct Recorder {
     records: RawRecords,
     recorders: Vec<Box<dyn SubRecorder + Send>>,
     collectors: HashMap<u64, Box<dyn Collector>>,
-    thread_rx: Receiver<LocalStorageRef>,
-    thread_stores: HashMap<usize, LocalStorage>,
+    thread_rx: Receiver<ThreadLocalMsg>,
+    thread_stores: HashMap<usize, ThreadLocalRef>,
     last_collect: Instant,
     last_cleanup: Instant,
 }
@@ -192,10 +193,19 @@ impl Recorder {
     }
 
     fn handle_thread_registration(&mut self) {
-        while let Ok(lsr) = self.thread_rx.try_recv() {
-            self.thread_stores.insert(lsr.id, lsr.storage.clone());
-            for r in &mut self.recorders {
-                r.thread_created(lsr.id, lsr.storage.shared_ptr.clone());
+        while let Ok(msg) = self.thread_rx.try_recv() {
+            match msg {
+                ThreadLocalMsg::Created(tlr) => {
+                    let id = tlr.id;
+                    let tag = tlr.shared_ptr.clone();
+                    self.thread_stores.insert(id, tlr);
+                    for r in &mut self.recorders {
+                        r.thread_created(id, tag.clone());
+                    }
+                }
+                ThreadLocalMsg::Destroyed(id) => {
+                    self.thread_stores.remove(&id);
+                }
             }
         }
     }
@@ -245,7 +255,7 @@ impl RecorderBuilder {
         let pause = Arc::new(AtomicBool::new(!self.enable));
         let precision_ms = self.precision_ms.clone();
         let (tx, rx) = unbounded();
-        register_storage_chan_tx(tx);
+        register_thread_local_chan_tx(tx);
         let now = Instant::now();
         let mut recorder = Recorder {
             pause: pause.clone(),
@@ -344,7 +354,7 @@ pub fn init_recorder(enable: bool, precision_ms: u64) -> RecorderHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::localstorage::STORAGE;
+    use crate::threadlocal::STORAGE;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -376,7 +386,7 @@ mod tests {
         fn tick(
             &mut self,
             _records: &mut RawRecords,
-            _thread_stores: &mut HashMap<usize, LocalStorage>,
+            _thread_stores: &mut HashMap<usize, ThreadLocalRef>,
         ) {
             OP_COUNT.fetch_add(1, SeqCst);
         }
@@ -393,7 +403,7 @@ mod tests {
     #[test]
     fn test_recorder() {
         let (tx, rx) = unbounded();
-        register_storage_chan_tx(tx);
+        register_thread_local_chan_tx(tx);
         std::thread::spawn(|| {
             STORAGE.with(|_| {});
         })

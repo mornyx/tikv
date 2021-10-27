@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::localstorage::LocalStorage;
 use crate::recorder::SubRecorder;
+use crate::threadlocal::ThreadLocalRef;
 use crate::utils;
 use crate::utils::Stat;
 use crate::{RawRecord, RawRecords, SharedTagPtr};
@@ -31,7 +31,7 @@ pub struct CpuRecorder {
 }
 
 impl SubRecorder for CpuRecorder {
-    fn tick(&mut self, records: &mut RawRecords, _: &mut HashMap<usize, LocalStorage>) {
+    fn tick(&mut self, records: &mut RawRecords, _: &mut HashMap<usize, ThreadLocalRef>) {
         let records = &mut records.records;
         self.thread_stats.iter_mut().for_each(|(tid, thread_stat)| {
             let cur_tag = thread_stat.shared_ptr.take_clone();
