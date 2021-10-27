@@ -78,6 +78,7 @@ impl ResourceMeteringTag {
             let prev = tld.shared_ptr.swap(self.clone());
             assert!(prev.is_none());
             tld.is_set.set(true);
+            tld.summary_cur_record.reset();
             Guard { tag: self.clone() }
         })
     }
@@ -227,7 +228,7 @@ impl TagInfos {
 ///
 /// The typical scenario is that we need to access all threads' tags in the
 /// [Recorder] thread for collection purposes, so we need a non-copy way to pass tags.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct SharedTagPtr {
     ptr: Arc<AtomicPtr<TagInfos>>,
 }

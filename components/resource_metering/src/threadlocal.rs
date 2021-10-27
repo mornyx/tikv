@@ -45,6 +45,7 @@ thread_local! {
 ///
 /// In order to facilitate mutual reference, the thread-local data of all sub-modules
 /// need to be stored centrally in `ThreadLocalData`.
+#[derive(Debug)]
 pub struct ThreadLocalData {
     pub is_set: Cell<bool>,
     pub shared_ptr: SharedTagPtr,
@@ -60,6 +61,7 @@ impl Drop for ThreadLocalData {
     }
 }
 
+#[derive(Debug)]
 pub struct ThreadLocalRef {
     pub id: usize,
     pub shared_ptr: SharedTagPtr,
@@ -70,6 +72,7 @@ pub struct ThreadLocalRef {
 /// This enum is transmitted as a event in [THREAD_LOCAL_CHANS].
 ///
 /// See [LOCAL_DATA] for more information.
+#[derive(Debug)]
 pub enum ThreadLocalMsg {
     Created(ThreadLocalRef),
     Destroyed(usize),
