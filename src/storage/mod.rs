@@ -64,7 +64,6 @@ pub use self::{
 };
 
 use crate::read_pool::{ReadPool, ReadPoolHandle};
-use crate::storage::key_prefix::TIDB_RANGES_COMPLEMENT;
 use crate::storage::metrics::CommandKind;
 use crate::storage::mvcc::MvccReader;
 use crate::storage::txn::commands::{RawAtomicStore, RawCompareAndSwap};
@@ -82,9 +81,7 @@ use crate::storage::{
     types::StorageCallbackType,
 };
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{
-    CfName, Iterable, KvEngine, Peekable, SyncMutable, CF_DEFAULT, DATA_CFS, DATA_KEY_PREFIX_LEN,
-};
+use engine_traits::{CfName, CF_DEFAULT, CF_LOCK, CF_WRITE, DATA_CFS};
 use futures::prelude::*;
 use kvproto::kvrpcpb::ApiVersion;
 use kvproto::kvrpcpb::{
@@ -92,9 +89,6 @@ use kvproto::kvrpcpb::{
     RawGetRequest,
 };
 use kvproto::pdpb::QueryKind;
-use kvproto::raft_serverpb::DataEncode;
-use protobuf::well_known_types::Int32Value;
-use protobuf::ProtobufEnum;
 use raftstore::store::util::build_key_range;
 use raftstore::store::{ReadStats, WriteStats};
 use rand::prelude::*;
@@ -150,6 +144,7 @@ pub struct Storage<E: Engine, L: LockManager> {
     // Fields below are storage configurations.
     max_key_size: usize,
 
+    api_version: ApiVersion,
     enable_ttl: bool,
 }
 
@@ -169,6 +164,7 @@ impl<E: Engine, L: LockManager> Clone for Storage<E, L> {
             refs: self.refs.clone(),
             max_key_size: self.max_key_size,
             concurrency_manager: self.concurrency_manager.clone(),
+            api_version: self.api_version,
             enable_ttl: self.enable_ttl,
         }
     }
@@ -218,12 +214,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         flow_controller: Arc<FlowController>,
         reporter: R,
     ) -> Result<Self> {
-        let config_data_encode = match config.api_version {
-            ApiVersion::V1 => DataEncode::V1,
-            ApiVersion::V2 => DataEncode::V2,
-        };
-        Self::ensure_to_use_data_encode(&engine, config_data_encode)?;
-
         let sched = TxnScheduler::new(
             engine.clone(),
             lock_mgr,
@@ -243,6 +233,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             concurrency_manager,
             refs: Arc::new(atomic::AtomicUsize::new(1)),
             max_key_size: config.max_key_size,
+            api_version: config.api_version(),
             enable_ttl: config.enable_ttl,
         })
     }
@@ -299,16 +290,27 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
     /// Check the given raw kv CF name. Return the CF name, or `Err` if given CF name is invalid.
     /// The CF name can be one of `"default"`, `"write"` and `"lock"`. If given `cf` is empty,
     /// `CF_DEFAULT` (`"default"`) will be returned.
-    fn rawkv_cf(cf: &str) -> Result<CfName> {
-        if cf.is_empty() {
-            return Ok(CF_DEFAULT);
-        }
-        for c in DATA_CFS {
-            if cf == *c {
-                return Ok(c);
+    fn rawkv_cf(api_version: ApiVersion, cf: &str) -> Result<CfName> {
+        match api_version {
+            ApiVersion::V1 | ApiVersion::V1ttl => {
+                if cf.is_empty() {
+                    return Ok(CF_DEFAULT);
+                }
+                for c in [CF_DEFAULT, CF_LOCK, CF_WRITE] {
+                    if cf == c {
+                        return Ok(c);
+                    }
+                }
+                Err(Error::from(ErrorInner::InvalidCf(cf.to_owned())))
+            }
+            ApiVersion::V2 => {
+                // API V2 doesn't allow raw requests from explicitly specifying a `cf`.
+                if cf.is_empty() {
+                    return Ok(CF_DEFAULT);
+                }
+                Err(Error::from(ErrorInner::CfDeprecated(cf.to_owned())))
             }
         }
-        Err(Error::from(ErrorInner::InvalidCf(cf.to_owned())))
     }
 
     /// Check if key range is valid
@@ -330,60 +332,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             }
         }
         true
-    }
-
-    /// Change the data encode flag in kvdb if the config file has a different value.
-    /// During the switch bewteen V1 and V2, only TiDB data are allowed to exist, otherwise return error.
-    fn ensure_to_use_data_encode(engine: &E, config_data_encode: DataEncode) -> Result<()> {
-        let kv = engine.kv_engine();
-        let kv_data_encode = kv
-            .get_msg::<Int32Value>(keys::DATA_ENCODE_KEY)?
-            .unwrap_or_default()
-            .value;
-        let kv_data_encode = DataEncode::from_i32(kv_data_encode).expect("unknown data encode");
-        if kv_data_encode != config_data_encode {
-            // Check if there are only TiDB data in the engine
-            let snapshot = kv.snapshot();
-            for cf in DATA_CFS {
-                for (start, end) in TIDB_RANGES_COMPLEMENT {
-                    let mut unexpected_data_key = None;
-                    snapshot.scan_cf(
-                        cf,
-                        &keys::data_key(start),
-                        &keys::data_key(end),
-                        false,
-                        |key, _| {
-                            unexpected_data_key = Some(key[DATA_KEY_PREFIX_LEN..].to_vec());
-                            Ok(false)
-                        },
-                    )?;
-                    if let Some(unexpected_data_key) = unexpected_data_key {
-                        error!(
-                            "unable to switch data encode (triggered by switching storage.api_version)";
-                            "current" => ?kv_data_encode,
-                            "target" => ?config_data_encode,
-                            "found data key that is not written by TiDB" => log_wrappers::hex_encode_upper(&unexpected_data_key),
-                        );
-                        return Err(box_err!(
-                            "unable to switch data encode (triggered by switching storage.api_version) from {:?} to {:?} \
-                            because found data key that is not written by TiDB: {:?}",
-                            kv_data_encode,
-                            config_data_encode,
-                            log_wrappers::hex_encode_upper(&unexpected_data_key)
-                        ));
-                    }
-                }
-            }
-            // Check completed. Switch the encode flag.
-            kv.put_msg(
-                keys::DATA_ENCODE_KEY,
-                &Int32Value {
-                    value: config_data_encode.value(),
-                    ..Default::default()
-                },
-            )?;
-        }
-        Ok(())
     }
 
     /// Get value of the given key from a snapshot.
@@ -1118,6 +1066,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         let res = self.read_pool.spawn_handle(
@@ -1144,7 +1093,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
                 let store = RawStore::new(snapshot, enable_ttl);
-                let cf = Self::rawkv_cf(&cf)?;
+                let cf = Self::rawkv_cf(api_version, &cf)?;
                 {
                     let begin_instant = Instant::now_coarse();
                     let mut stats = Statistics::default();
@@ -1182,6 +1131,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         // all requests in a batch have the same region, epoch, term, replica_read
         let priority = gets[0].get_context().get_priority();
         let priority_tag = get_priority_tag(priority);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         // The resource tags of these batched requests are not the same, and it is quite expensive
@@ -1226,7 +1176,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                         Ok(snapshot) => {
                             let mut stats = Statistics::default();
                             let store = RawStore::new(snapshot, enable_ttl);
-                            match Self::rawkv_cf(&cf) {
+                            match Self::rawkv_cf(api_version, &cf) {
                                 Ok(cf) => {
                                     consumer.consume(
                                         id,
@@ -1279,6 +1229,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         let res = self.read_pool.spawn_handle(
@@ -1310,7 +1261,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 {
                     let begin_instant = Instant::now_coarse();
 
-                    let cf = Self::rawkv_cf(&cf)?;
+                    let cf = Self::rawkv_cf(api_version, &cf)?;
                     // no scan_count for this kind of op.
                     let mut stats = Statistics::default();
                     let result: Vec<Result<KvPair>> = keys
@@ -1362,7 +1313,11 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         callback: Callback<()>,
     ) -> Result<()> {
         check_key_size!(Some(&key).into_iter(), self.max_key_size, callback);
-        let mut m = Modify::Put(Self::rawkv_cf(&cf)?, Key::from_encoded(key), value);
+        let mut m = Modify::Put(
+            Self::rawkv_cf(self.api_version, &cf)?,
+            Key::from_encoded(key),
+            value,
+        );
         if self.enable_ttl {
             let expire_ts = convert_to_expire_ts(ttl);
             m.with_ttl(expire_ts);
@@ -1391,7 +1346,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         ttls: Vec<u64>,
         callback: Callback<()>,
     ) -> Result<()> {
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
 
         check_key_size!(
             pairs.iter().map(|(ref k, _)| k),
@@ -1447,7 +1402,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         check_key_size!(Some(&key).into_iter(), self.max_key_size, callback);
 
         let mut batch = WriteData::from_modifies(vec![Modify::Delete(
-            Self::rawkv_cf(&cf)?,
+            Self::rawkv_cf(self.api_version, &cf)?,
             Key::from_encoded(key),
         )]);
         batch.set_allowed_on_disk_almost_full();
@@ -1478,7 +1433,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             callback
         );
 
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
         let start_key = Key::from_encoded(start_key);
         let end_key = Key::from_encoded(end_key);
 
@@ -1503,7 +1458,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         keys: Vec<Vec<u8>>,
         callback: Callback<()>,
     ) -> Result<()> {
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
         check_key_size!(keys.iter(), self.max_key_size, callback);
 
         let modifies = keys
@@ -1547,6 +1502,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         let res = self.read_pool.spawn_handle(
@@ -1574,7 +1530,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 };
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
-                let cf = Self::rawkv_cf(&cf)?;
+                let cf = Self::rawkv_cf(api_version, &cf)?;
                 {
                     let store = RawStore::new(snapshot, enable_ttl);
                     let begin_instant = Instant::now_coarse();
@@ -1648,6 +1604,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         let res = self.read_pool.spawn_handle(
@@ -1663,7 +1620,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 };
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
-                let cf = Self::rawkv_cf(&cf)?;
+                let cf = Self::rawkv_cf(api_version, &cf)?;
                 {
                     let store = RawStore::new(snapshot, enable_ttl);
                     let begin_instant = Instant::now();
@@ -1760,6 +1717,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
+        let api_version = self.api_version;
         let enable_ttl = self.enable_ttl;
 
         let res = self.read_pool.spawn_handle(
@@ -1786,7 +1744,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
                 let store = RawStore::new(snapshot, enable_ttl);
-                let cf = Self::rawkv_cf(&cf)?;
+                let cf = Self::rawkv_cf(api_version, &cf)?;
                 {
                     let begin_instant = Instant::now_coarse();
                     let mut stats = Statistics::default();
@@ -1823,7 +1781,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         ttl: u64,
         cb: Callback<(Option<Value>, bool)>,
     ) -> Result<()> {
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
         let ttl = if self.enable_ttl {
             Some(ttl)
         } else {
@@ -1852,7 +1810,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         } else if ttls.iter().any(|&x| x != 0) {
             return Err(Error::from(ErrorInner::TTLNotEnabled));
         }
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
         let muations = if !self.enable_ttl {
             pairs
                 .into_iter()
@@ -1885,7 +1843,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         keys: Vec<Vec<u8>>,
         callback: Callback<()>,
     ) -> Result<()> {
-        let cf = Self::rawkv_cf(&cf)?;
+        let cf = Self::rawkv_cf(self.api_version, &cf)?;
         let muations = keys
             .into_iter()
             .map(|k| RawMutation::Delete {
@@ -1906,7 +1864,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
         let resource_tag = ResourceMeteringTag::from_rpc_context(&ctx);
-        let enable_ttl = self.enable_ttl;
+        let api_version = self.api_version;
 
         let res = self.read_pool.spawn_handle(
             async move {
@@ -1915,6 +1873,9 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     .get(priority_tag)
                     .inc();
 
+                if api_version != ApiVersion::V2 {
+                    return Err(box_err!("raw_checksum is only available in API V2"));
+                }
                 if algorithm != ChecksumAlgorithm::Crc64Xor {
                     return Err(box_err!("unknown checksum algorithm {:?}", algorithm));
                 }
@@ -1927,12 +1888,8 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
                 let begin_instant = tikv_util::time::Instant::now_coarse();
-                let ret = if enable_ttl {
-                    let snap = TTLSnapshot::from(snapshot);
-                    raw::raw_checksum_ranges(snap, ranges).await
-                } else {
-                    raw::raw_checksum_ranges(snapshot, ranges).await
-                };
+                // raw_checksum are only available in API V2, where TTL must be enabled.
+                let ret = raw::raw_checksum_ranges(TTLSnapshot::from(snapshot), ranges).await;
                 SCHED_PROCESSING_READ_HISTOGRAM_STATIC
                     .get(CMD)
                     .observe(begin_instant.saturating_elapsed().as_secs_f64());
@@ -2087,11 +2044,6 @@ impl<E: Engine, L: LockManager> TestStorageBuilder<E, L> {
 
     pub fn set_async_apply_prewrite(mut self, enabled: bool) -> Self {
         self.config.enable_async_apply_prewrite = enabled;
-        self
-    }
-
-    pub fn set_api_version(mut self, api_version: ApiVersion) -> Self {
-        self.config.api_version = api_version;
         self
     }
 
@@ -2337,7 +2289,7 @@ mod tests {
     use engine_traits::{ALL_CFS, CF_LOCK, CF_RAFT, CF_WRITE};
     use errors::extract_key_error;
     use futures::executor::block_on;
-    use kvproto::kvrpcpb::{ApiVersion, CommandPri, Op};
+    use kvproto::kvrpcpb::{CommandPri, Op};
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -7071,93 +7023,5 @@ mod tests {
             )
             .unwrap();
         rx.recv().unwrap();
-    }
-
-    #[test]
-    fn test_switch_api_version() {
-        let engine = TestEngineBuilder::new().build().unwrap();
-
-        // Write TiDB data.
-        let tidb_key = keys::data_key(b"m_tidb_data");
-        engine
-            .put(
-                &Context::default(),
-                Key::from_raw(&tidb_key),
-                b"val".to_vec(),
-            )
-            .unwrap();
-
-        // Default API Version is V1, should be ablle to swith to V2.
-        let storage = TestStorageBuilder::<_, DummyLockManager>::from_engine_and_lock_mgr(
-            engine.clone(),
-            DummyLockManager {},
-        )
-        .set_api_version(ApiVersion::V2)
-        .build()
-        .unwrap();
-        drop(storage);
-
-        // Should be able to switch back to V1.
-        let storage = TestStorageBuilder::<_, DummyLockManager>::from_engine_and_lock_mgr(
-            engine.clone(),
-            DummyLockManager {},
-        )
-        .set_api_version(ApiVersion::V1)
-        .build()
-        .unwrap();
-        drop(storage);
-
-        // Write non-TiDB data.
-        let non_tidb_key = keys::data_key(b"k1");
-        engine
-            .put(
-                &Context::default(),
-                Key::from_raw(&non_tidb_key),
-                b"val".to_vec(),
-            )
-            .unwrap();
-
-        // Should not able to switch from V1 to V2 now.
-        assert!(
-            TestStorageBuilder::<_, DummyLockManager>::from_engine_and_lock_mgr(
-                engine,
-                DummyLockManager {},
-            )
-            .set_api_version(ApiVersion::V2)
-            .build()
-            .is_err()
-        );
-
-        // Prepare a new storage and switch it to V2.
-        let engine = TestEngineBuilder::new().build().unwrap();
-        let storage = TestStorageBuilder::<_, DummyLockManager>::from_engine_and_lock_mgr(
-            engine.clone(),
-            DummyLockManager {},
-        )
-        .set_api_version(ApiVersion::V2)
-        .build()
-        .unwrap();
-        drop(storage);
-
-        // Write non-TiDB data.
-        let non_tidb_key = keys::data_key(b"k1");
-        engine
-            .put(
-                &Context::default(),
-                Key::from_raw(&non_tidb_key),
-                b"val".to_vec(),
-            )
-            .unwrap();
-
-        // Should not able to switch from V2 to V1 now.
-        assert!(
-            TestStorageBuilder::<_, DummyLockManager>::from_engine_and_lock_mgr(
-                engine,
-                DummyLockManager {},
-            )
-            .set_api_version(ApiVersion::V1)
-            .build()
-            .is_err()
-        );
     }
 }
