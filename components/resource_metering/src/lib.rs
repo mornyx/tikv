@@ -259,7 +259,7 @@ impl SharedTagPtr {
 }
 
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::{Mutex, MutexGuard};
