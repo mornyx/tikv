@@ -454,7 +454,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             r
                         });
 
-                    resource_metering::record_read_keys(statistics.write.processed_keys as u32);
                     let delta = perf_statistics.delta();
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
@@ -714,7 +713,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             kv_pairs
                         });
 
-                    resource_metering::record_read_keys(statistics.write.processed_keys as u32);
                     let delta = perf_statistics.delta();
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
@@ -855,7 +853,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     let res = scanner.scan(limit, sample_step);
 
                     let statistics = scanner.take_statistics();
-                    resource_metering::record_read_keys(statistics.write.processed_keys as u32);
                     let delta = perf_statistics.delta();
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
