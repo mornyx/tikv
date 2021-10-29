@@ -70,18 +70,18 @@ impl SubRecorder for SummaryRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threadlocal::{register_thread_local_chan_tx, ThreadLocalMsg};
+
+    use crate::threadlocal::take_thread_registrations;
     use crate::{ResourceMeteringTag, TagInfos, GLOBAL_ENABLE};
-    use crossbeam::channel::unbounded;
+
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
 
     #[test]
     fn test_collect() {
-        GLOBAL_ENABLE.store(true, SeqCst);
-        let (tx, rx) = unbounded();
-        register_thread_local_chan_tx(tx);
+        let _g = crate::tests::sequential_test();
 
+        GLOBAL_ENABLE.store(true, SeqCst);
         std::thread::spawn(|| {
             let tag = ResourceMeteringTag {
                 infos: Arc::new(TagInfos {
@@ -140,11 +140,12 @@ mod tests {
 
         let mut records = RawRecords::default();
         let mut thread_stores = HashMap::default();
-        while let Ok(msg) = rx.try_recv() {
-            if let ThreadLocalMsg::Created(tlr) = msg {
+        take_thread_registrations(|tlrs| {
+            for tlr in tlrs {
                 thread_stores.insert(tlr.id, tlr);
             }
-        }
+        });
+
         let mut recorder = SummaryRecorder::default();
         recorder.collect(&mut records, &mut thread_stores);
         assert!(!records.records.is_empty());

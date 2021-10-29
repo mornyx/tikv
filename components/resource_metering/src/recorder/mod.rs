@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::collector::{Collector, CollectorReg, COLLECTOR_REG_CHAN};
-use crate::threadlocal::{register_thread_local_chan_tx, ThreadLocalMsg, ThreadLocalRef};
+use crate::threadlocal::{take_thread_registrations, ThreadLocalRef};
 use crate::{RawRecords, SharedTagPtr};
 
 use std::io;
@@ -13,7 +13,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use collections::HashMap;
-use crossbeam::channel::{unbounded, Receiver};
 use tikv_util::time::Instant;
 
 mod cpu;
@@ -95,9 +94,7 @@ pub struct Recorder {
     records: RawRecords,
     recorders: Vec<Box<dyn SubRecorder + Send>>,
     collectors: HashMap<u64, Box<dyn Collector>>,
-    thread_rx: Receiver<ThreadLocalMsg>,
     thread_stores: HashMap<usize, ThreadLocalRef>,
-    destroyed_threads: Vec<usize>,
     last_collect: Instant,
     last_cleanup: Instant,
 }
@@ -139,10 +136,9 @@ impl Recorder {
 
     fn cleanup(&mut self) {
         if self.last_cleanup.saturating_elapsed().as_secs() > CLEANUP_INTERVAL_SECS {
-            for id in &self.destroyed_threads {
-                self.thread_stores.remove(id);
-            }
-            self.destroyed_threads.clear();
+            self.thread_stores
+                .drain_filter(|_, t| t.is_thread_down())
+                .count();
             if self.records.records.capacity() > RECORD_LEN_THRESHOLD
                 && self.records.records.len() < (RECORD_LEN_THRESHOLD / 2)
             {
@@ -190,21 +186,16 @@ impl Recorder {
     }
 
     fn handle_thread_registration(&mut self) {
-        while let Ok(msg) = self.thread_rx.try_recv() {
-            match msg {
-                ThreadLocalMsg::Created(tlr) => {
-                    let id = tlr.id;
-                    let tag = tlr.shared_ptr.clone();
-                    self.thread_stores.insert(id, tlr);
-                    for r in &mut self.recorders {
-                        r.thread_created(id, tag.clone());
-                    }
-                }
-                ThreadLocalMsg::Destroyed(id) => {
-                    self.destroyed_threads.push(id);
+        take_thread_registrations(|tlrs| {
+            for tlr in tlrs {
+                let id = tlr.id;
+                let tag = tlr.shared_ptr.clone();
+                self.thread_stores.insert(id, tlr);
+                for r in &mut self.recorders {
+                    r.thread_created(id, tag.clone());
                 }
             }
-        }
+        });
     }
 }
 
@@ -251,8 +242,6 @@ impl RecorderBuilder {
     pub fn spawn(self) -> io::Result<RecorderHandle> {
         let pause = Arc::new(AtomicBool::new(!self.enable));
         let precision_ms = self.precision_ms.clone();
-        let (tx, rx) = unbounded();
-        register_thread_local_chan_tx(tx);
         let now = Instant::now();
         let mut recorder = Recorder {
             pause: pause.clone(),
@@ -260,9 +249,7 @@ impl RecorderBuilder {
             records: RawRecords::default(),
             recorders: self.recorders,
             collectors: HashMap::default(),
-            thread_rx: rx,
             thread_stores: HashMap::default(),
-            destroyed_threads: Vec::new(),
             last_collect: now,
             last_cleanup: now,
         };
@@ -400,8 +387,8 @@ mod tests {
 
     #[test]
     fn test_recorder() {
-        let (tx, rx) = unbounded();
-        register_thread_local_chan_tx(tx);
+        let _g = crate::tests::sequential_test();
+
         std::thread::spawn(|| {
             LOCAL_DATA.with(|_| {});
         })
@@ -414,9 +401,7 @@ mod tests {
             records: RawRecords::default(),
             recorders: vec![Box::new(MockSubRecorder)],
             collectors: HashMap::default(),
-            thread_rx: rx,
             thread_stores: HashMap::default(),
-            destroyed_threads: Vec::new(),
             last_collect: now,
             last_cleanup: now,
         };

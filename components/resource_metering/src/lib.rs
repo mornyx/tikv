@@ -259,11 +259,38 @@ impl SharedTagPtr {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+
+    use std::sync::{Mutex, MutexGuard};
+
+    use crate::threadlocal::take_thread_registrations;
+    use lazy_static::lazy_static;
+
+    /// Tests that access [crate::threadlocal::THREAD_REGISTER_BUFFER] or [crate::config::GLOBAL_ENABLE]
+    /// need to be run sequentially. A helper function to
+    pub fn sequential_test() -> TestGuard {
+        TestGuard {
+            _guard: SEQ_LOCK.lock().unwrap(),
+        }
+    }
+
+    lazy_static! {
+        static ref SEQ_LOCK: Mutex<()> = Mutex::new(());
+    }
+    pub struct TestGuard {
+        _guard: MutexGuard<'static, ()>,
+    }
+    impl Drop for TestGuard {
+        fn drop(&mut self) {
+            take_thread_registrations(|_| {});
+        }
+    }
 
     #[test]
     fn test_attach() {
+        let _g = crate::tests::sequential_test();
+
         // Use a thread created by ourself. If we use unit test thread directly,
         // the test results may be affected by parallel testing.
         std::thread::spawn(|| {

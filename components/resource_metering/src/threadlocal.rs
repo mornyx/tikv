@@ -4,23 +4,31 @@ use crate::model::SummaryRecord;
 use crate::{utils, ResourceMeteringTag, SharedTagPtr};
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::vec::Drain;
 
 use collections::HashMap;
-use crossbeam::channel::Sender;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    /// `THREAD_LOCAL_CHANS` is used to transfer the necessary thread registration events.
-    static ref THREAD_LOCAL_CHANS: Mutex<Vec<Sender<ThreadLocalMsg>>> = Mutex::new(Vec::new());
+    /// `THREAD_REGISTER_BUFFER` is used to store the new thread registrations.
+    static ref THREAD_REGISTER_BUFFER: Mutex<Vec<ThreadLocalRef>> = Mutex::new(Vec::new());
+}
+
+pub fn take_thread_registrations<F, T>(mut consume: F) -> T
+where
+    F: FnMut(Drain<ThreadLocalRef>) -> T,
+{
+    consume(THREAD_REGISTER_BUFFER.lock().unwrap().drain(..))
 }
 
 thread_local! {
     /// `LOCAL_DATA` is a thread-localized instance of [ThreadLocalData].
     ///
-    /// When a new thread tries to read `LOCAL_DATA`, it will actively send a message
-    /// to [THREAD_LOCAL_CHANS] during the initialization phase of thread local storage.
-    /// The message([ThreadLocalRef]) contains the thread id and some references to
+    /// When a new thread tries to read `LOCAL_DATA`, it will actively store its [ThreadLocalRef]
+    /// to [THREAD_REGISTER_BUFFER] during the initialization phase of thread local storage.
+    /// The [ThreadLocalRef] contains the thread id and some references to
     /// the thread local fields.
     pub static LOCAL_DATA: ThreadLocalData = {
         let local_data = ThreadLocalData {
@@ -28,15 +36,17 @@ thread_local! {
             shared_ptr: SharedTagPtr::default(),
             summary_cur_record: Arc::new(SummaryRecord::default()),
             summary_records: Arc::new(Mutex::new(HashMap::default())),
+            is_thread_down: Arc::new(AtomicBool::new(false)),
         };
-        THREAD_LOCAL_CHANS.lock().unwrap().iter().for_each(|tx| {
-            tx.send(ThreadLocalMsg::Created(ThreadLocalRef{
+        THREAD_REGISTER_BUFFER.lock().unwrap().push(
+            ThreadLocalRef {
                 id: utils::thread_id(),
                 shared_ptr: local_data.shared_ptr.clone(),
                 summary_cur_record: local_data.summary_cur_record.clone(),
                 summary_records: local_data.summary_records.clone(),
-            })).ok();
-        });
+                is_down: local_data.is_thread_down.clone(),
+            }
+        );
         local_data
     };
 }
@@ -51,13 +61,12 @@ pub struct ThreadLocalData {
     pub shared_ptr: SharedTagPtr,
     pub summary_cur_record: Arc<SummaryRecord>,
     pub summary_records: Arc<Mutex<HashMap<ResourceMeteringTag, SummaryRecord>>>,
+    pub is_thread_down: Arc<AtomicBool>,
 }
 
 impl Drop for ThreadLocalData {
     fn drop(&mut self) {
-        THREAD_LOCAL_CHANS.lock().unwrap().iter().for_each(|tx| {
-            tx.send(ThreadLocalMsg::Destroyed(utils::thread_id())).ok();
-        });
+        self.is_thread_down.store(true, Ordering::SeqCst);
     }
 }
 
@@ -67,50 +76,53 @@ pub struct ThreadLocalRef {
     pub shared_ptr: SharedTagPtr,
     pub summary_cur_record: Arc<SummaryRecord>,
     pub summary_records: Arc<Mutex<HashMap<ResourceMeteringTag, SummaryRecord>>>,
+    pub is_down: Arc<AtomicBool>,
 }
 
-/// This enum is transmitted as a event in [THREAD_LOCAL_CHANS].
-///
-/// See [LOCAL_DATA] for more information.
-#[derive(Debug)]
-pub enum ThreadLocalMsg {
-    Created(ThreadLocalRef),
-    Destroyed(usize),
-}
-
-/// Register a channel to notify thread creation & destruction events.
-pub fn register_thread_local_chan_tx(tx: Sender<ThreadLocalMsg>) {
-    THREAD_LOCAL_CHANS.lock().unwrap().push(tx);
+impl ThreadLocalRef {
+    pub fn is_thread_down(&self) -> bool {
+        self.is_down.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam::channel::unbounded;
+    use crossbeam::sync::WaitGroup;
 
     #[test]
-    fn test_thread_local_chan() {
-        let (tx, rx) = unbounded();
-        register_thread_local_chan_tx(tx);
-        LOCAL_DATA.with(|_| {}); // Just to trigger registration.
-        std::thread::spawn(move || {
+    fn test_thread_local_registration() {
+        let _g = crate::tests::sequential_test();
+
+        let (next_step, stop_t0) = (WaitGroup::new(), WaitGroup::new());
+        let (n, s) = (next_step.clone(), stop_t0.clone());
+        let t0 = std::thread::spawn(move || {
             LOCAL_DATA.with(|_| {});
-        })
-        .join()
-        .unwrap();
-        let mut count = 0;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                ThreadLocalMsg::Created(r) => {
-                    assert_ne!(r.id, 0);
-                }
-                ThreadLocalMsg::Destroyed(id) => {
-                    assert_ne!(id, 0);
-                }
-            }
-            count += 1;
-        }
-        // This value may be greater than 2 if other test threads access `LOCAL_DATA` in parallel.
-        assert!(count >= 2);
+            drop(n);
+            s.wait();
+        });
+        next_step.wait();
+
+        let (next_step, stop_t1) = (WaitGroup::new(), WaitGroup::new());
+        let (n, s) = (next_step.clone(), stop_t1.clone());
+        let t1 = std::thread::spawn(move || {
+            LOCAL_DATA.with(|_| {});
+            drop(n);
+            s.wait();
+        });
+        next_step.wait();
+
+        let registrations = take_thread_registrations(|t| t.collect::<Vec<_>>());
+        assert_eq!(registrations.len(), 2);
+        assert!(!registrations[0].is_thread_down());
+        assert!(!registrations[1].is_thread_down());
+
+        drop(stop_t0);
+        t0.join().unwrap();
+        assert!(registrations[0].is_thread_down());
+
+        drop(stop_t1);
+        t1.join().unwrap();
+        assert!(registrations[1].is_thread_down());
     }
 }
