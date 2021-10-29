@@ -103,6 +103,7 @@ impl<T: Storage> RangesScanner<T> {
                 if let Some(r) = self.scanned_rows_per_range.last_mut() {
                     *r += 1;
                 }
+                resource_metering::record_read_keys(1);
 
                 return Ok(some_row);
             } else {
